@@ -87,3 +87,28 @@ def _load_via_trees_api(
         ))
     return docs
 
+def split_and_enrich(
+        raw_docs: list[Document],
+        repo:str,
+        branch:str,
+        chunk_size: int,
+        chunk_overlap: int,
+)-> list[Document]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size= chunk_size,
+        chunk_overlap= chunk_overlap,
+        add_start_index = True,
+        separators=["\n## ", "\n### ", "\n\n", "\n", " ", ""],
+    )
+    docs = splitter.split_documents(raw_docs)
+
+    for doc in docs:
+        path = doc.metadata.get("path", "")
+        doc.metadata["source"] = f"https://github.com/{repo}/blob/{branch}/{path}"
+        doc.metadata["repo"] = repo
+        doc.metadata["branch"] = branch
+        doc.metadata["file_path"] = path
+        doc.metadata["file_type"] = path.rsplit(".",1)[-1] if "." in path else "unknown"
+
+    print(f" split into {len(docs)} chunks")
+    return docs
