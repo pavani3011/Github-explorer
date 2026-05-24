@@ -112,3 +112,139 @@ def split_and_enrich(
 
     print(f" split into {len(docs)} chunks")
     return docs
+
+
+def build_vectorstore(
+        docs: list[Document],
+        pinecone_api_key:str,
+        openai_api_key :str,
+        index_name: str,
+)->PineconeVectorStore:
+    print(f"\n Upserting {len(docs)} chunks into pinecone index '{index_name}'...")
+
+    pc = Pinecone(api_key=pinecone_api_key)
+    existing = [i.name for i in pc.list_indexes()]
+    if index_name not in existing:
+        pc.create_index(
+            name=index_name,
+            dimension=1536,
+            metric="cosine",
+            spec = ServerlessSpec(cloud="aws", region="us-east-1"),
+        )
+        print(f" created new index : {index_name}")
+    else:
+        print(f" reusing existing index: {index_name}")
+
+    embeddings = OpenAIEmbeddings(
+        model= "text-embedding-3-small",
+        openai_api_key = openai_api_key,
+    )
+
+    vectorstore = PineconeVectorStore.from_documents(
+        documents=docs,
+        embedding= embeddings,
+        index_name= index_name,
+
+    )
+
+    print("upsert complete.")
+    return vectorstore
+
+def build_prompt(repo:str)-> ChatPromptTemplate:
+    examples = [
+        {
+            "question": "What does the 'BaseLLM.__call__' method do?",
+            "answer": (
+                "`BaseLLM.__call__` is the entry point when you invoke a LangChain LLM "
+                "like a function. Internally it delegates to `generate()`, which handles "
+                "batching and returns an `LLMResult`. It also fires callbacks "
+                "(on_llm_start, on_llm_end) so the tracing layer can record inputs and "
+                "outputs. Key point: it always wraps the raw string in an "
+                "`LLMResult.generations` list, even for single prompts."
+            ),
+        },
+        {
+            "question": "How does `RecursiveCharacterTextSplitter` decide where to split?",
+            "answer": (
+                "It tries each separator in order — by default "
+                r'["\n\n", "\n", " ", ""]'
+                " — and splits on the first one that keeps chunks ≤ chunk_size. "
+                "This preserves paragraph → sentence → word structure. "
+                "When chunk_overlap > 0, the tail of one chunk is prepended to "
+                "the next, so context isn't lost across boundaries."
+            ),
+        },
+        {
+            "question": "What is the purpose of `ConversationBufferMemory`?",
+            "answer": (
+                "`ConversationBufferMemory` stores every human/AI message pair as plain "
+                "text in a growing buffer. On each new turn it injects the full history "
+                "into the prompt under the `history` key. Unlike "
+                "`ConversationSummaryMemory` it does not compress, so it preserves exact "
+                "wording at the cost of growing token usage per turn."
+            ),
+        },
+    ]
+    
+    example_prompt = ChatPromptTemplate([
+        ("human", "{question}"),
+        ("ai","{answer}"),
+    ])
+
+    few_shot = FewShotChatMessagePromptTemplate(
+        example_prompt=example_prompt,
+        examples=examples,
+    )
+
+    prompt = ChatPromptTemplate.from_messages([
+        SystemMessagePromptTemplate.from_template(
+            "You are a senior software engineer explaining code from the "
+            f"{repo} GitHub repository.\n"
+            "Rules:\n"
+            "  • Always cite the source file when referencing code.\n"
+            "  • Prioritise the retrieved context; use general knowledge only as a last resort.\n"
+            "  • Be concise, precise, and highlight edge cases.\n\n"
+            "Context from the repository:\n{context}"
+        ),
+        few_shot,
+        HumanMessagePromptTemplate.from_template("{question}"),
+    ])
+    return prompt
+
+def build_chain(
+        vectorstore: PineconeVectorStore,
+        prompt:ChatPromptTemplate,
+        openai_api_key:str,
+        top_k: int,
+)-> ConversationalRetrievalChain:
+    print("\nBuilding ConversationalRetrievalChain...")
+
+    retriever = vectorstore.as_retriever(
+        search_Type = "similarity",
+        search_kwargs= {"k": top_k},
+    )
+
+    memory = ConversationBufferMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        output_key="answer",
+    )
+
+    llm = ChatOpenAI(
+        model="gpt-4o",
+        temperature=0,
+        openai_api_key=openai_api_key,
+    )
+
+    chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        memory=memory,
+        combine_docs_chain_kwargs={"prompt":prompt},
+        return_source_documents=True,
+        verbose=False,
+    )
+
+    print("Chain ready.\n")
+    return chain
+
