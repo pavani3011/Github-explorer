@@ -248,3 +248,22 @@ def build_chain(
     print("Chain ready.\n")
     return chain
 
+def ask(chain: ConversationalRetrievalChain, question:str)-> str:
+    print(f"\n? {question}")
+    result  = chain.invoke({"question": question})
+
+    print(F"\n Answer:\n{result['answer']}")
+
+    seen = set()
+    sources = []
+    for doc in result.get("source_documents",[]):
+        url = doc.metadata.get("source", "unknown")
+        if url not in seen:
+            sources.append(url)
+            seen.add(url)
+    if sources:
+        print("\n Sources:")
+        for url in sources:
+            print(f" -> {url}")
+
+    return result["answer"]
